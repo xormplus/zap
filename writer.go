@@ -23,10 +23,15 @@ package zap
 import (
 	"io"
 	"io/ioutil"
+	"sync"
 )
 
-// Discard is a convenience wrapper around ioutil.Discard.
-var Discard = AddSync(ioutil.Discard)
+var (
+	// Discard is a convenience wrapper around ioutil.Discard.
+	Discard = AddSync(ioutil.Discard)
+	// DiscardOutput is an Option that discards logger output.
+	DiscardOutput = Output(Discard)
+)
 
 // A WriteFlusher is an io.Writer that can also flush any buffered data.
 type WriteFlusher interface {
@@ -54,6 +59,29 @@ func AddSync(w io.Writer) WriteSyncer {
 	default:
 		return writerWrapper{w}
 	}
+}
+
+type lockedWriteSyncer struct {
+	sync.Mutex
+	ws WriteSyncer
+}
+
+func newLockedWriteSyncer(ws WriteSyncer) WriteSyncer {
+	return &lockedWriteSyncer{ws: ws}
+}
+
+func (s *lockedWriteSyncer) Write(bs []byte) (int, error) {
+	s.Lock()
+	n, err := s.ws.Write(bs)
+	s.Unlock()
+	return n, err
+}
+
+func (s *lockedWriteSyncer) Sync() error {
+	s.Lock()
+	err := s.ws.Sync()
+	s.Unlock()
+	return err
 }
 
 type writerWrapper struct {

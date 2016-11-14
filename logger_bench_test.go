@@ -34,21 +34,25 @@ type user struct {
 	CreatedAt time.Time
 }
 
-func (u user) MarshalLog(kv zap.KeyValue) error {
+func (u *user) MarshalLog(kv zap.KeyValue) error {
 	kv.AddString("name", u.Name)
 	kv.AddString("email", u.Email)
 	kv.AddInt64("created_at", u.CreatedAt.UnixNano())
 	return nil
 }
 
-var _jane = user{
+var _jane = &user{
 	Name:      "Jane Doe",
 	Email:     "jane@test.com",
 	CreatedAt: time.Date(1980, 1, 1, 12, 0, 0, 0, time.UTC),
 }
 
 func withBenchedLogger(b *testing.B, f func(zap.Logger)) {
-	logger := zap.NewJSON(zap.All, zap.Output(zap.Discard))
+	logger := zap.New(
+		zap.NewJSONEncoder(),
+		zap.DebugLevel,
+		zap.DiscardOutput,
+	)
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -95,7 +99,7 @@ func BenchmarkStringField(b *testing.B) {
 
 func BenchmarkStringerField(b *testing.B) {
 	withBenchedLogger(b, func(log zap.Logger) {
-		log.Info("Level.", zap.Stringer("foo", zap.Info))
+		log.Info("Level.", zap.Stringer("foo", zap.InfoLevel))
 	})
 }
 
@@ -115,7 +119,7 @@ func BenchmarkDurationField(b *testing.B) {
 func BenchmarkErrorField(b *testing.B) {
 	err := errors.New("egad!")
 	withBenchedLogger(b, func(log zap.Logger) {
-		log.Info("Error.", zap.Err(err))
+		log.Info("Error.", zap.Error(err))
 	})
 }
 
@@ -126,8 +130,6 @@ func BenchmarkStackField(b *testing.B) {
 }
 
 func BenchmarkMarshalerField(b *testing.B) {
-	// Expect an extra allocation here, since casting the user struct to the
-	// zap.Marshaler interface costs an alloc.
 	withBenchedLogger(b, func(log zap.Logger) {
 		log.Info("Arbitrary zap.LogMarshaler.", zap.Marshaler("user", _jane))
 	})
@@ -140,8 +142,9 @@ func BenchmarkObjectField(b *testing.B) {
 }
 
 func BenchmarkAddCallerHook(b *testing.B) {
-	logger := zap.NewJSON(
-		zap.Output(zap.Discard),
+	logger := zap.New(
+		zap.NewJSONEncoder(),
+		zap.DiscardOutput,
 		zap.AddCaller(),
 	)
 	b.ResetTimer()
@@ -171,7 +174,11 @@ func Benchmark10Fields(b *testing.B) {
 
 func Benchmark100Fields(b *testing.B) {
 	const batchSize = 50
-	logger := zap.NewJSON(zap.All, zap.Output(zap.Discard))
+	logger := zap.New(
+		zap.NewJSONEncoder(),
+		zap.DebugLevel,
+		zap.DiscardOutput,
+	)
 
 	// Don't include allocating these helper slices in the benchmark. Since
 	// access to them isn't synchronized, we can't run the benchmark in

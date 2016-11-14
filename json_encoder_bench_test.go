@@ -34,10 +34,22 @@ type logRecord struct {
 	Fields  map[string]interface{} `json:"fields"`
 }
 
+func BenchmarkJSONLogMarshalerFunc(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		enc := NewJSONEncoder()
+		enc.AddMarshaler("nested", LogMarshalerFunc(func(kv KeyValue) error {
+			kv.AddInt("i", i)
+			return nil
+		}))
+		enc.Free()
+	}
+}
+
 func BenchmarkZapJSON(b *testing.B) {
+	ts := time.Unix(0, 0)
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			enc := newJSONEncoder()
+			enc := NewJSONEncoder()
 			enc.AddString("str", "foo")
 			enc.AddInt("int", 1)
 			enc.AddInt64("int64", 1)
@@ -47,7 +59,7 @@ func BenchmarkZapJSON(b *testing.B) {
 			enc.AddString("string3", "🤔")
 			enc.AddString("string4", "🙊")
 			enc.AddBool("bool", true)
-			enc.WriteMessage(ioutil.Discard, "debug", "fake", time.Unix(0, 0))
+			enc.WriteEntry(ioutil.Discard, "fake", DebugLevel, ts)
 			enc.Free()
 		}
 	})

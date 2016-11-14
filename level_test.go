@@ -28,14 +28,12 @@ import (
 
 func TestLevelString(t *testing.T) {
 	tests := map[Level]string{
-		All:        "all",
-		Debug:      "debug",
-		Info:       "info",
-		Warn:       "warn",
-		Error:      "error",
-		Panic:      "panic",
-		Fatal:      "fatal",
-		None:       "none",
+		DebugLevel: "debug",
+		InfoLevel:  "info",
+		WarnLevel:  "warn",
+		ErrorLevel: "error",
+		PanicLevel: "panic",
+		FatalLevel: "fatal",
 		Level(-42): "Level(-42)",
 	}
 
@@ -49,14 +47,12 @@ func TestLevelText(t *testing.T) {
 		text  string
 		level Level
 	}{
-		{"all", All},
-		{"debug", Debug},
-		{"info", Info},
-		{"warn", Warn},
-		{"error", Error},
-		{"panic", Panic},
-		{"fatal", Fatal},
-		{"none", None},
+		{"debug", DebugLevel},
+		{"info", InfoLevel},
+		{"warn", WarnLevel},
+		{"error", ErrorLevel},
+		{"panic", PanicLevel},
+		{"fatal", FatalLevel},
 	}
 	for _, tt := range tests {
 		lvl := tt.level

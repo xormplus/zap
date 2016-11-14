@@ -18,43 +18,45 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-package benchmarks
+package zap
 
 import (
-	"io/ioutil"
-	"log"
-	"testing"
-
-	"github.com/uber-go/zap"
-	"github.com/uber-go/zap/zwrap"
+	"sync"
+	"time"
 )
 
-func BenchmarkStandardLibraryWithoutFields(b *testing.B) {
-	logger := log.New(ioutil.Discard, "", log.LstdFlags)
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			logger.Println("Go fast.")
-		}
-	})
+var (
+	_timeNow   = time.Now // for tests
+	_entryPool = sync.Pool{New: func() interface{} { return &Entry{} }}
+)
+
+// An Entry represents a complete log message. The entry's structured context
+// is already serialized, but the log level, time, and message are available
+// for inspection and modification.
+//
+// Entries are pooled, so any functions that accept them must be careful not to
+// retain references to them.
+type Entry struct {
+	Level   Level
+	Time    time.Time
+	Message string
+	enc     Encoder
 }
 
-func BenchmarkZapStandardizeWithoutFields(b *testing.B) {
-	logger, err := zwrap.Standardize(
-		zap.New(
-			zap.NewJSONEncoder(),
-			zap.DebugLevel,
-			zap.DiscardOutput,
-		),
-		zap.InfoLevel,
-	)
-	if err != nil {
-		panic("Failed to Standardize a zap.Logger.")
-	}
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			logger.Println("Go fast.")
-		}
-	})
+func newEntry(lvl Level, msg string, enc Encoder) *Entry {
+	e := _entryPool.Get().(*Entry)
+	e.Level = lvl
+	e.Message = msg
+	e.Time = _timeNow().UTC()
+	e.enc = enc
+	return e
+}
+
+// Fields returns a mutable reference to the entry's accumulated context.
+func (e *Entry) Fields() KeyValue {
+	return e.enc
+}
+
+func (e *Entry) free() {
+	_entryPool.Put(e)
 }

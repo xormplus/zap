@@ -36,10 +36,9 @@ func WithIter(l zap.Logger, n int) zap.Logger {
 	return l.With(zap.Int("iter", n))
 }
 
-func fakeSampler(tick time.Duration, first, thereafter int, development bool) (zap.Logger, *spy.Sink) {
-	base, sink := spy.New()
-	base.SetLevel(zap.All)
-	base.SetDevelopment(development)
+func fakeSampler(lvl zap.Level, tick time.Duration, first, thereafter int, development bool) (zap.Logger, *spy.Sink) {
+	base, sink := spy.New(lvl)
+	base.Development = development
 	sampler := Sample(base, tick, first, thereafter)
 	return sampler, sink
 }
@@ -63,46 +62,38 @@ func TestSampler(t *testing.T) {
 		development bool
 	}{
 		{
-			level:   zap.Debug,
+			level:   zap.DebugLevel,
 			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Debug("sample") },
 		},
 		{
-			level:   zap.Info,
+			level:   zap.InfoLevel,
 			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Info("sample") },
 		},
 		{
-			level:   zap.Warn,
+			level:   zap.WarnLevel,
 			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Warn("sample") },
 		},
 		{
-			level:   zap.Error,
+			level:   zap.ErrorLevel,
 			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Error("sample") },
 		},
 		{
-			level:   zap.Panic,
-			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Panic("sample") },
-		},
-		{
-			level:   zap.Fatal,
-			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Fatal("sample") },
-		},
-		{
-			level:   zap.Error,
+			level:   zap.ErrorLevel,
 			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).DFatal("sample") },
 		},
 		{
-			level:       zap.Fatal,
+			level:       zap.FatalLevel,
 			logFunc:     func(sampler zap.Logger, n int) { WithIter(sampler, n).DFatal("sample") },
 			development: true,
 		},
 		{
-			level:   zap.Error,
-			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Log(zap.Error, "sample") },
+			level:   zap.ErrorLevel,
+			logFunc: func(sampler zap.Logger, n int) { WithIter(sampler, n).Log(zap.ErrorLevel, "sample") },
 		},
 	}
 
 	for _, tt := range tests {
-		sampler, sink := fakeSampler(time.Minute, 2, 3, tt.development)
+		sampler, sink := fakeSampler(zap.DebugLevel, time.Minute, 2, 3, tt.development)
 		for i := 1; i < 10; i++ {
 			tt.logFunc(sampler, i)
 		}
@@ -112,22 +103,21 @@ func TestSampler(t *testing.T) {
 }
 
 func TestSampledDisabledLevels(t *testing.T) {
-	sampler, sink := fakeSampler(time.Minute, 1, 100, false)
-	sampler.SetLevel(zap.Info)
+	sampler, sink := fakeSampler(zap.InfoLevel, time.Minute, 1, 100, false)
 
 	// Shouldn't be counted, because debug logging isn't enabled.
 	WithIter(sampler, 1).Debug("sample")
 	WithIter(sampler, 2).Info("sample")
-	expected := buildExpectation(zap.Info, 2)
+	expected := buildExpectation(zap.InfoLevel, 2)
 	assert.Equal(t, expected, sink.Logs(), "Expected to disregard disabled log levels.")
 }
 
 func TestSamplerWithSharesCounters(t *testing.T) {
-	logger, sink := fakeSampler(time.Minute, 1, 100, false)
+	logger, sink := fakeSampler(zap.DebugLevel, time.Minute, 1, 100, false)
 
 	expected := []spy.Log{
 		{
-			Level:  zap.Info,
+			Level:  zap.InfoLevel,
 			Msg:    "sample",
 			Fields: []zap.Field{zap.String("child", "first"), zap.Int("iter", 1)},
 		},
@@ -149,7 +139,7 @@ func TestSamplerWithSharesCounters(t *testing.T) {
 
 func TestSamplerTicks(t *testing.T) {
 	// Ensure that we're resetting the sampler's counter every tick.
-	sampler, sink := fakeSampler(time.Millisecond, 1, 1000, false)
+	sampler, sink := fakeSampler(zap.DebugLevel, time.Millisecond, 1, 1000, false)
 
 	// The first statement should be logged, the second should be skipped but
 	// start the reset timer, and then we sleep. After sleeping for more than a
@@ -161,28 +151,42 @@ func TestSamplerTicks(t *testing.T) {
 		WithIter(sampler, i).Info("sample")
 	}
 
-	expected := buildExpectation(zap.Info, 1, 3)
+	expected := buildExpectation(zap.InfoLevel, 1, 3)
 	assert.Equal(t, expected, sink.Logs(), "Expected sleeping for a tick to reset sampler.")
 }
 
 func TestSamplerCheck(t *testing.T) {
-	sampler, sink := fakeSampler(time.Millisecond, 1, 10, false)
-	sampler.SetLevel(zap.Info)
+	sampler, sink := fakeSampler(zap.InfoLevel, time.Millisecond, 1, 10, false)
 
-	assert.Nil(t, sampler.Check(zap.Debug, "foo"), "Expected a nil CheckedMessage at disabled log levels.")
+	assert.Nil(t, sampler.Check(zap.DebugLevel, "foo"), "Expected a nil CheckedMessage at disabled log levels.")
 
 	for i := 1; i < 12; i++ {
-		if cm := sampler.Check(zap.Info, "sample"); cm.OK() {
+		if cm := sampler.Check(zap.InfoLevel, "sample"); cm.OK() {
 			cm.Write(zap.Int("iter", i))
 		}
 	}
 
-	expected := buildExpectation(zap.Info, 1, 11)
+	expected := buildExpectation(zap.InfoLevel, 1, 11)
 	assert.Equal(t, expected, sink.Logs(), "Unexpected output when sampling with Check.")
 }
 
+func TestSamplerCheckPanicFatal(t *testing.T) {
+	for _, level := range []zap.Level{zap.FatalLevel, zap.PanicLevel} {
+		sampler, sink := fakeSampler(zap.FatalLevel+1, time.Millisecond, 1, 10, false)
+
+		assert.Nil(t, sampler.Check(zap.DebugLevel, "foo"), "Expected a nil CheckedMessage at disabled log levels.")
+		for i := 0; i < 5; i++ {
+			if cm := sampler.Check(level, "sample"); assert.True(t, cm.OK(), "expected %v level to always be OK", level) {
+				cm.Write(zap.Int("iter", i))
+			}
+		}
+
+		assert.Equal(t, []spy.Log(nil), sink.Logs(), "Unexpected output when sampling with Check.")
+	}
+}
+
 func TestSamplerRaces(t *testing.T) {
-	sampler, _ := fakeSampler(time.Minute, 1, 1000, false)
+	sampler, _ := fakeSampler(zap.DebugLevel, time.Minute, 1, 1000, false)
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})

@@ -22,6 +22,7 @@ package zap
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -34,34 +35,62 @@ import (
 const (
 	// For JSON-escaping; see jsonEncoder.safeAddString below.
 	_hex = "0123456789abcdef"
-	// Initial buffer size.
+	// Initial buffer size for encoders.
 	_initialBufSize = 1024
 )
 
-var jsonPool = sync.Pool{
-	New: func() interface{} {
+var (
+	// errNilSink signals that Encoder.WriteEntry was called with a nil WriteSyncer.
+	errNilSink = errors.New("can't write encoded message a nil WriteSyncer")
+
+	// Default formatters for JSON encoders.
+	defaultMessageF = MessageKey("msg")
+	defaultTimeF    = EpochFormatter("ts")
+	defaultLevelF   = LevelString("level")
+
+	jsonPool = sync.Pool{New: func() interface{} {
 		return &jsonEncoder{
 			// Pre-allocate a reasonably-sized buffer for each encoder.
 			bytes: make([]byte, 0, _initialBufSize),
 		}
-	},
-}
+	}}
+)
 
-// jsonEncoder is a logging-optimized JSON encoder.
+// jsonEncoder is an Encoder implementation that writes JSON.
 type jsonEncoder struct {
-	bytes []byte
+	bytes    []byte
+	messageF MessageFormatter
+	timeF    TimeFormatter
+	levelF   LevelFormatter
 }
 
-// newJSONEncoder creates an encoder, re-using one from the pool if possible. The
-// returned encoder is initialized and ready for use.
-func newJSONEncoder() *jsonEncoder {
+// NewJSONEncoder creates a fast, low-allocation JSON encoder. By default, JSON
+// encoders put the log message under the "msg" key, the timestamp (as
+// floating-point seconds since epoch) under the "ts" key, and the log level
+// under the "level" key. The encoder appropriately escapes all field keys and
+// values.
+//
+// Note that the encoder doesn't deduplicate keys, so it's possible to produce a
+// message like
+//   {"foo":"bar","foo":"baz"}
+// This is permitted by the JSON specification, but not encouraged. Many
+// libraries will ignore duplicate key-value pairs (typically keeping the last
+// pair) when unmarshaling, but users should attempt to avoid adding duplicate
+// keys.
+func NewJSONEncoder(options ...JSONOption) Encoder {
 	enc := jsonPool.Get().(*jsonEncoder)
 	enc.truncate()
+
+	enc.messageF = defaultMessageF
+	enc.timeF = defaultTimeF
+	enc.levelF = defaultLevelF
+	for _, opt := range options {
+		opt.apply(enc)
+	}
+
 	return enc
 }
 
-// Free returns the encoder to the pool. Callers should not retain any
-// references to the freed object.
 func (enc *jsonEncoder) Free() {
 	jsonPool.Put(enc)
 }
@@ -79,11 +108,7 @@ func (enc *jsonEncoder) AddString(key, val string) {
 // key is JSON-escaped.
 func (enc *jsonEncoder) AddBool(key string, val bool) {
 	enc.addKey(key)
-	if val {
-		enc.bytes = append(enc.bytes, "true"...)
-		return
-	}
-	enc.bytes = append(enc.bytes, "false"...)
+	enc.bytes = strconv.AppendBool(enc.bytes, val)
 }
 
 // AddInt adds a string key and integer value to the encoder's fields. The key
@@ -99,10 +124,27 @@ func (enc *jsonEncoder) AddInt64(key string, val int64) {
 	enc.bytes = strconv.AppendInt(enc.bytes, val, 10)
 }
 
+// AddUint adds a string key and integer value to the encoder's fields. The key
+// is JSON-escaped.
+func (enc *jsonEncoder) AddUint(key string, val uint) {
+	enc.AddUint64(key, uint64(val))
+}
+
+// AddUint64 adds a string key and integer value to the encoder's fields. The key
+// is JSON-escaped.
+func (enc *jsonEncoder) AddUint64(key string, val uint64) {
+	enc.addKey(key)
+	enc.bytes = strconv.AppendUint(enc.bytes, val, 10)
+}
+
+func (enc *jsonEncoder) AddUintptr(key string, val uintptr) {
+	enc.AddUint64(key, uint64(val))
+}
+
 // AddFloat64 adds a string key and float64 value to the encoder's fields. The
 // key is JSON-escaped, and the floating-point value is encoded using
-// strconv.FormatFloat's 'g' option (exponential notation for large exponents,
-// grade-school notation otherwise).
+// strconv.FormatFloat's 'f' option (always use grade-school notation, even for
+// large exponents).
 func (enc *jsonEncoder) AddFloat64(key string, val float64) {
 	enc.addKey(key)
 	switch {
@@ -113,77 +155,73 @@ func (enc *jsonEncoder) AddFloat64(key string, val float64) {
 	case math.IsInf(val, -1):
 		enc.bytes = append(enc.bytes, `"-Inf"`...)
 	default:
-		enc.bytes = strconv.AppendFloat(enc.bytes, val, 'g', -1, 64)
+		enc.bytes = strconv.AppendFloat(enc.bytes, val, 'f', -1, 64)
 	}
 }
 
-// Nest allows the caller to populate a nested object under the provided key.
-func (enc *jsonEncoder) Nest(key string, f func(KeyValue) error) error {
+// AddMarshaler adds a LogMarshaler to the encoder's fields.
+func (enc *jsonEncoder) AddMarshaler(key string, obj LogMarshaler) error {
 	enc.addKey(key)
 	enc.bytes = append(enc.bytes, '{')
-	err := f(enc)
+	err := obj.MarshalLog(enc)
 	enc.bytes = append(enc.bytes, '}')
 	return err
 }
 
-// AddMarshaler adds a LogMarshaler to the encoder's fields.
-//
-// TODO: Encode the error into the message instead of returning.
-func (enc *jsonEncoder) AddMarshaler(key string, obj LogMarshaler) error {
-	return enc.Nest(key, func(kv KeyValue) error {
-		return obj.MarshalLog(kv)
-	})
-}
-
 // AddObject uses reflection to add an arbitrary object to the logging context.
-func (enc *jsonEncoder) AddObject(key string, obj interface{}) {
+func (enc *jsonEncoder) AddObject(key string, obj interface{}) error {
 	marshaled, err := json.Marshal(obj)
-	if err != nil {
-		enc.AddString(key, err.Error())
-		return
-	}
-	enc.addKey(key)
-	enc.bytes = append(enc.bytes, marshaled...)
-}
-
-// Clone copies the current encoder, including any data already encoded.
-func (enc *jsonEncoder) Clone() encoder {
-	clone := newJSONEncoder()
-	clone.bytes = append(clone.bytes, enc.bytes...)
-	return clone
-}
-
-// AddFields applies the passed fields to this encoder.
-func (enc *jsonEncoder) AddFields(fields []Field) error {
-	return addFields(enc, fields)
-}
-
-// WriteMessage writes a complete log message to the supplied writer, including
-// the encoder's accumulated fields. It doesn't modify or lock the encoder's
-// underlying byte slice. It's safe to call from multiple goroutines, but it's
-// not safe to call CreateMessage while adding fields.
-func (enc *jsonEncoder) WriteMessage(sink io.Writer, lvl string, msg string, ts time.Time) error {
-	// Grab an encoder from the pool so that we can re-use the underlying
-	// buffer.
-	final := newJSONEncoder()
-	defer final.Free()
-
-	final.bytes = append(final.bytes, `{"msg":"`...)
-	final.safeAddString(msg)
-	final.bytes = append(final.bytes, `","level":"`...)
-	final.bytes = append(final.bytes, lvl...)
-	final.bytes = append(final.bytes, `","ts":`...)
-	final.bytes = strconv.AppendInt(final.bytes, ts.UnixNano(), 10)
-	final.bytes = append(final.bytes, `,"fields":{`...)
-	final.bytes = append(final.bytes, enc.bytes...)
-	final.bytes = append(final.bytes, "}}\n"...)
-
-	n, err := sink.Write(final.bytes)
 	if err != nil {
 		return err
 	}
-	if n != len(final.bytes) {
-		return fmt.Errorf("incomplete write: only wrote %v of %v bytes", n, len(final.bytes))
+	enc.addKey(key)
+	enc.bytes = append(enc.bytes, marshaled...)
+	return nil
+}
+
+// Clone copies the current encoder, including any data already encoded.
+func (enc *jsonEncoder) Clone() Encoder {
+	clone := jsonPool.Get().(*jsonEncoder)
+	clone.truncate()
+	clone.bytes = append(clone.bytes, enc.bytes...)
+	clone.messageF = enc.messageF
+	clone.timeF = enc.timeF
+	clone.levelF = enc.levelF
+	return clone
+}
+
+// WriteEntry writes a complete log message to the supplied writer, including
+// the encoder's accumulated fields. It doesn't modify or lock the encoder's
+// underlying byte slice. It's safe to call from multiple goroutines, but it's
+// not safe to call WriteEntry while adding fields.
+func (enc *jsonEncoder) WriteEntry(sink io.Writer, msg string, lvl Level, t time.Time) error {
+	if sink == nil {
+		return errNilSink
+	}
+
+	final := jsonPool.Get().(*jsonEncoder)
+	final.truncate()
+	final.bytes = append(final.bytes, '{')
+	enc.levelF(lvl).AddTo(final)
+	enc.timeF(t).AddTo(final)
+	enc.messageF(msg).AddTo(final)
+	if len(enc.bytes) > 0 {
+		if len(final.bytes) > 1 {
+			// All the formatters may have been no-ops.
+			final.bytes = append(final.bytes, ',')
+		}
+		final.bytes = append(final.bytes, enc.bytes...)
+	}
+	final.bytes = append(final.bytes, '}', '\n')
+
+	expectedBytes := len(final.bytes)
+	n, err := sink.Write(final.bytes)
+	final.Free()
+	if err != nil {
+		return err
+	}
+	if n != expectedBytes {
+		return fmt.Errorf("incomplete write: only wrote %v of %v bytes", n, expectedBytes)
 	}
 	return nil
 }

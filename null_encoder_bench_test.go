@@ -21,27 +21,38 @@
 package zap
 
 import (
-	"errors"
+	"io/ioutil"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
+	"time"
 )
 
-func maybeFail(fail bool) error {
-	var errs multiError
-	if fail {
-		errs = append(errs, errors.New("fail"))
+func BenchmarkNullLogMarshalerFunc(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		enc := NullEncoder()
+		enc.AddMarshaler("nested", LogMarshalerFunc(func(kv KeyValue) error {
+			kv.AddInt("i", i)
+			return nil
+		}))
+		enc.Free()
 	}
-	if len(errs) > 0 {
-		return errs
-	}
-	return nil
 }
 
-func TestMultiError(t *testing.T) {
-	err := maybeFail(false)
-	assert.NoError(t, err, "Didn't expect an error.")
-	err = maybeFail(true)
-	assert.Error(t, err, "Expected an error.")
-	assert.Equal(t, "fail", err.Error(), "Unexpected string representation of multiError.")
+func BenchmarkZapNull(b *testing.B) {
+	ts := time.Unix(0, 0)
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			enc := NullEncoder()
+			enc.AddString("str", "foo")
+			enc.AddInt("int", 1)
+			enc.AddInt64("int64", 1)
+			enc.AddFloat64("float64", 1.0)
+			enc.AddString("string1", "\n")
+			enc.AddString("string2", "💩")
+			enc.AddString("string3", "🤔")
+			enc.AddString("string4", "🙊")
+			enc.AddBool("bool", true)
+			enc.WriteEntry(ioutil.Discard, "fake", DebugLevel, ts)
+			enc.Free()
+		}
+	})
 }

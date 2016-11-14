@@ -22,41 +22,22 @@ package zap
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-func TestJSONLoggerCheck(t *testing.T) {
-	withJSONLogger(t, opts(InfoLevel), func(logger Logger, buf *testBuffer) {
-		assert.False(
-			t,
-			logger.Check(DebugLevel, "Debug.").OK(),
-			"Expected CheckedMessage to be not OK at disabled levels.",
-		)
-
-		cm := logger.Check(InfoLevel, "Info.")
-		require.True(t, cm.OK(), "Expected CheckedMessage to be OK at enabled levels.")
-		cm.Write(Int("magic", 42))
-		assert.Equal(
-			t,
-			`{"level":"info","msg":"Info.","magic":42}`,
-			buf.Stripped(),
-			"Unexpected output after writing a CheckedMessage.",
-		)
-	})
+func stubNow(afterEpoch time.Duration) func() {
+	prev := _timeNow
+	t := time.Unix(0, int64(afterEpoch))
+	_timeNow = func() time.Time { return t }
+	return func() { _timeNow = prev }
 }
 
-func TestCheckedMessageIsSingleUse(t *testing.T) {
-	expected := []string{
-		`{"level":"info","msg":"single-use"}`,
-		`{"level":"error","msg":"Shouldn't re-use a CheckedMessage.","original":"single-use"}`,
-	}
-	withJSONLogger(t, nil, func(logger Logger, buf *testBuffer) {
-		cm := logger.Check(InfoLevel, "single-use")
-		cm.Write() // ok
-		cm.Write() // first re-use logs error
-		cm.Write() // second re-use is silently ignored
-		assert.Equal(t, expected, buf.Lines(), "Expected re-using a CheckedMessage to log an error.")
-	})
+func TestNewEntry(t *testing.T) {
+	defer stubNow(0)()
+	e := newEntry(DebugLevel, "hello", nil)
+	assert.Equal(t, DebugLevel, e.Level, "Unexpected log level.")
+	assert.Equal(t, time.Unix(0, 0).UTC(), e.Time, "Unexpected time.")
+	assert.Nil(t, e.Fields(), "Unexpected fields.")
 }

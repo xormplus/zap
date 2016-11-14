@@ -64,121 +64,89 @@ func (s *Sink) Logs() []Log {
 // Logger satisfies zap.Logger, but makes testing convenient.
 type Logger struct {
 	sync.Mutex
+	zap.Meta
 
-	level       zap.Level
-	sink        *Sink
-	context     []zap.Field
-	development bool
+	sink    *Sink
+	context []zap.Field
 }
 
-// New returns a new spy logger at the default level and its sink.
-func New() (*Logger, *Sink) {
+// New constructs a spy logger that collects spy.Log records to a Sink. It
+// returns the logger and its sink.
+//
+// Options can change things like log level and initial fields, but any output
+// related options will not be honored.
+func New(options ...zap.Option) (*Logger, *Sink) {
 	s := &Sink{}
 	return &Logger{
-		// Use the same defaults as the core logger.
-		level: zap.NewJSON().Level(),
-		sink:  s,
+		Meta: zap.MakeMeta(zap.NewJSONEncoder(zap.NoTime()), options...),
+		sink: s,
 	}, s
-}
-
-// StubTime is a no-op, since the spy logger omits time entirely.
-func (l *Logger) StubTime() {}
-
-// SetDevelopment sets the development flag.
-func (l *Logger) SetDevelopment(dev bool) {
-	l.Lock()
-	l.development = dev
-	l.Unlock()
-}
-
-// Enabled checks whether logging at the specified level is enabled.
-func (l *Logger) Enabled(lvl zap.Level) bool {
-	return lvl >= l.Level()
-}
-
-// Level returns the currently-enabled logging level.
-func (l *Logger) Level() zap.Level {
-	l.Lock()
-	defer l.Unlock()
-
-	return l.level
-}
-
-// SetLevel alters the enabled log level.
-func (l *Logger) SetLevel(new zap.Level) {
-	l.Lock()
-	defer l.Unlock()
-
-	l.level = new
 }
 
 // With creates a new Logger with additional fields added to the logging context.
 func (l *Logger) With(fields ...zap.Field) zap.Logger {
 	return &Logger{
-		level:       l.level,
-		sink:        l.sink,
-		context:     append(l.context, fields...),
-		development: l.development,
+		Meta:    l.Meta.Clone(),
+		sink:    l.sink,
+		context: append(l.context, fields...),
 	}
 }
 
 // Check returns a CheckedMessage if logging a particular message would succeed.
 func (l *Logger) Check(lvl zap.Level, msg string) *zap.CheckedMessage {
-	if !l.Enabled(lvl) {
-		return nil
-	}
-	return zap.NewCheckedMessage(l, lvl, msg)
+	return l.Meta.Check(l, lvl, msg)
 }
 
 // Log writes a message at the specified level.
 func (l *Logger) Log(lvl zap.Level, msg string, fields ...zap.Field) {
-	l.sink.WriteLog(lvl, msg, l.allFields(fields))
+	l.log(lvl, msg, fields)
 }
 
 // Debug logs at the Debug level.
 func (l *Logger) Debug(msg string, fields ...zap.Field) {
-	l.sink.WriteLog(zap.Debug, msg, l.allFields(fields))
+	l.log(zap.DebugLevel, msg, fields)
 }
 
 // Info logs at the Info level.
 func (l *Logger) Info(msg string, fields ...zap.Field) {
-	l.sink.WriteLog(zap.Info, msg, l.allFields(fields))
-
+	l.log(zap.InfoLevel, msg, fields)
 }
 
 // Warn logs at the Warn level.
 func (l *Logger) Warn(msg string, fields ...zap.Field) {
-	l.sink.WriteLog(zap.Warn, msg, l.allFields(fields))
-
+	l.log(zap.WarnLevel, msg, fields)
 }
 
 // Error logs at the Error level.
 func (l *Logger) Error(msg string, fields ...zap.Field) {
-	l.sink.WriteLog(zap.Error, msg, l.allFields(fields))
-
+	l.log(zap.ErrorLevel, msg, fields)
 }
 
 // Panic logs at the Panic level. Note that the spy Logger doesn't actually
 // panic.
 func (l *Logger) Panic(msg string, fields ...zap.Field) {
-	l.sink.WriteLog(zap.Panic, msg, l.allFields(fields))
-
+	l.log(zap.PanicLevel, msg, fields)
 }
 
 // Fatal logs at the Fatal level. Note that the spy logger doesn't actuall call
 // os.Exit.
 func (l *Logger) Fatal(msg string, fields ...zap.Field) {
-	l.sink.WriteLog(zap.Fatal, msg, l.allFields(fields))
-
+	l.log(zap.FatalLevel, msg, fields)
 }
 
-// DFatal logs at the Fatal level if the development flag is set, and the Fatal
+// DFatal logs at the Fatal level if the development flag is set, and the Error
 // level otherwise.
 func (l *Logger) DFatal(msg string, fields ...zap.Field) {
-	if l.development {
-		l.sink.WriteLog(zap.Fatal, msg, l.allFields(fields))
+	if l.Development {
+		l.log(zap.FatalLevel, msg, fields)
 	} else {
-		l.sink.WriteLog(zap.Error, msg, l.allFields(fields))
+		l.log(zap.ErrorLevel, msg, fields)
+	}
+}
+
+func (l *Logger) log(lvl zap.Level, msg string, fields []zap.Field) {
+	if l.Meta.Enabled(lvl) {
+		l.sink.WriteLog(lvl, msg, l.allFields(fields))
 	}
 }
 

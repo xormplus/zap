@@ -29,31 +29,31 @@ import (
 )
 
 func TestHookAddCaller(t *testing.T) {
-	buf := newTestBuffer()
-	logger := NewJSON(All, Output(buf), AddCaller())
+	buf := &testBuffer{}
+	logger := New(NewJSONEncoder(), DebugLevel, Output(buf), AddCaller())
 	logger.Info("Callers.")
 
 	re := regexp.MustCompile(`"msg":"hook_test.go:[\d]+: Callers\."`)
-	assert.Regexp(t, re, buf.String(), "Expected to find package name and file name in output.")
+	assert.Regexp(t, re, buf.Stripped(), "Expected to find package name and file name in output.")
 }
 
 func TestHookAddCallerFail(t *testing.T) {
-	buf := newTestBuffer()
-	errBuf := newTestBuffer()
+	buf := &testBuffer{}
+	errBuf := &testBuffer{}
 
 	originalSkip := _callerSkip
 	_callerSkip = 1e3
 	defer func() { _callerSkip = originalSkip }()
 
-	logger := NewJSON(All, Output(buf), ErrorOutput(errBuf), AddCaller())
+	logger := New(NewJSONEncoder(), DebugLevel, Output(buf), ErrorOutput(errBuf), AddCaller())
 	logger.Info("Failure.")
 	assert.Equal(t, "failed to get caller\n", errBuf.String(), "Didn't find expected failure message.")
 	assert.Contains(t, buf.String(), `"msg":"Failure."`, "Expected original message to survive failures in runtime.Caller.")
 }
 
 func TestHookAddStacks(t *testing.T) {
-	buf := newTestBuffer()
-	logger := NewJSON(All, Output(buf), AddStacks(Info))
+	buf := &testBuffer{}
+	logger := New(NewJSONEncoder(), DebugLevel, Output(buf), AddStacks(InfoLevel))
 
 	logger.Info("Stacks.")
 	output := buf.String()
@@ -67,4 +67,19 @@ func TestHookAddStacks(t *testing.T) {
 	buf.Reset()
 	logger.Debug("No stacks.")
 	assert.NotContains(t, buf.String(), "Unexpected stacktrace at Debug level.")
+}
+
+func TestHooksNilEntry(t *testing.T) {
+	tests := []struct {
+		name string
+		hook Hook
+	}{
+		{"AddStacks", AddStacks(InfoLevel).(Hook)},
+		{"AddCaller", AddCaller().(Hook)},
+	}
+	for _, tt := range tests {
+		assert.NotPanics(t, func() {
+			assert.Equal(t, errHookNilEntry, tt.hook(nil), "Expected an error running hook %s on a nil message.", tt.name)
+		}, "Unexpected panic running hook %s on a nil message.", tt.name)
+	}
 }

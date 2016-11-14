@@ -20,14 +20,9 @@
 
 package zap
 
-import "strings"
+import "time"
 
-type multiError []error
-
-func (m multiError) Error() string {
-	msgs := make([]string, len(m))
-	for i, err := range m {
-		msgs[i] = err.Error()
-	}
-	return strings.Join(msgs, ", ")
+func timeToSeconds(t time.Time) float64 {
+	nanos := float64(t.UnixNano())
+	return nanos / float64(time.Second)
 }

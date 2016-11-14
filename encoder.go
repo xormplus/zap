@@ -25,12 +25,24 @@ import (
 	"time"
 )
 
-// encoder is a format-agnostic interface for all log field encoders. It's not
-// safe for concurrent use.
-type encoder interface {
+// Encoder is a format-agnostic interface for all log entry marshalers. Since
+// log encoders don't need to support the same wide range of use cases as
+// general-purpose marshalers, it's possible to make them much faster and
+// lower-allocation.
+//
+// Implementations of the KeyValue interface's methods can, of course, freely
+// modify the receiver. However, the Clone and WriteEntry methods will be
+// called concurrently and shouldn't modify the receiver.
+type Encoder interface {
 	KeyValue
-	AddFields([]Field) error
-	Clone() encoder
+
+	// Copy the encoder, ensuring that adding fields to the copy doesn't affect
+	// the original.
+	Clone() Encoder
+	// Return the encoder to the appropriate sync.Pool. Unpooled encoder
+	// implementations can no-op this method.
 	Free()
-	WriteMessage(io.Writer, string, string, time.Time) error
+	// Write the supplied message, level, and timestamp to the writer, along with
+	// any accumulated context.
+	WriteEntry(io.Writer, string, Level, time.Time) error
 }

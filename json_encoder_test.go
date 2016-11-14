@@ -23,6 +23,7 @@ package zap
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"strings"
@@ -35,15 +36,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var epoch = time.Date(1970, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+func newJSONEncoder(opts ...JSONOption) *jsonEncoder {
+	return NewJSONEncoder(opts...).(*jsonEncoder)
+}
+
 func assertJSON(t *testing.T, expected string, enc *jsonEncoder) {
 	assert.Equal(t, expected, string(enc.bytes), "Encoded JSON didn't match expectations.")
 }
 
 func withJSONEncoder(f func(*jsonEncoder)) {
 	enc := newJSONEncoder()
-	enc.AddString("foo", "bar")
 	f(enc)
 	enc.Free()
+}
+
+type testBuffer struct {
+	bytes.Buffer
+}
+
+func (b *testBuffer) Sync() error {
+	return nil
+}
+
+func (b *testBuffer) Lines() []string {
+	output := strings.Split(b.String(), "\n")
+	return output[:len(output)-1]
+}
+
+func (b *testBuffer) Stripped() string {
+	return strings.TrimRight(b.String(), "\n")
 }
 
 type noJSON struct{}
@@ -52,145 +75,133 @@ func (nj noJSON) MarshalJSON() ([]byte, error) {
 	return nil, errors.New("no")
 }
 
-func TestJSONAddString(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddString("baz", "bing")
-		assertJSON(t, `"foo":"bar","baz":"bing"`, enc)
-
-		// Keys and values should be escaped.
-		enc.truncate()
-		enc.AddString(`foo\`, `bar\`)
-		assertJSON(t, `"foo\\":"bar\\"`, enc)
-	})
-}
-
-func TestJSONAddBool(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddBool("baz", true)
-		assertJSON(t, `"foo":"bar","baz":true`, enc)
-
-		// Keys should be escaped.
-		enc.truncate()
-		enc.AddBool(`foo\`, false)
-		assertJSON(t, `"foo\\":false`, enc)
-	})
-}
-
-func TestJSONAddInt(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddInt("baz", 2)
-		assertJSON(t, `"foo":"bar","baz":2`, enc)
-
-		// Keys should be escaped.
-		enc.truncate()
-		enc.AddInt(`foo\`, 1)
-		assertJSON(t, `"foo\\":1`, enc)
-	})
-}
-
-func TestJSONAddInt64(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddInt64("baz", 2)
-		assertJSON(t, `"foo":"bar","baz":2`, enc)
-
-		// Keys should be escaped.
-		enc.truncate()
-		enc.AddInt64(`foo\`, 1)
-		assertJSON(t, `"foo\\":1`, enc)
-	})
-}
-
-func TestJSONAddFloat64(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddFloat64("baz", 1e10)
-		assertJSON(t, `"foo":"bar","baz":1e+10`, enc)
-
-		// Keys should be escaped.
-		enc.truncate()
-		enc.AddFloat64(`foo\`, 1.0)
-		assertJSON(t, `"foo\\":1`, enc)
-
-		// Test floats that can't be represented in JSON.
-		enc.truncate()
-		enc.AddFloat64(`foo`, math.NaN())
-		assertJSON(t, `"foo":"NaN"`, enc)
-
-		enc.truncate()
-		enc.AddFloat64(`foo`, math.Inf(1))
-		assertJSON(t, `"foo":"+Inf"`, enc)
-
-		enc.truncate()
-		enc.AddFloat64(`foo`, math.Inf(-1))
-		assertJSON(t, `"foo":"-Inf"`, enc)
-	})
-}
-
-func TestJSONWriteMessage(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		sink := bytes.NewBuffer(nil)
-
-		// Messages should be escaped.
-		err := enc.WriteMessage(sink, "info", `hello\`, time.Unix(0, 0))
-		assert.NoError(t, err, "WriteMessage returned an unexpected error.")
-		assert.Equal(t,
-			`{"msg":"hello\\","level":"info","ts":0,"fields":{"foo":"bar"}}`,
-			strings.TrimRight(sink.String(), "\n"),
-		)
-
-		// We should be able to re-use the encoder, preserving the accumulated
-		// fields.
-		sink.Reset()
-		err = enc.WriteMessage(sink, "debug", "fake msg", time.Unix(0, 100))
-		assert.NoError(t, err, "WriteMessage returned an unexpected error.")
-		assert.Equal(t,
-			`{"msg":"fake msg","level":"debug","ts":100,"fields":{"foo":"bar"}}`,
-			strings.TrimRight(sink.String(), "\n"),
-		)
-	})
-}
-
-func TestJSONNest(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		err := enc.Nest("nested", func(kv KeyValue) error {
-			kv.AddString("sub-foo", "sub-bar")
-			return nil
-		})
-		require.NoError(t, err, "Unexpected error using Nest.")
-		enc.AddString("baz", "bing")
-
-		assertJSON(t, `"foo":"bar","nested":{"sub-foo":"sub-bar"},"baz":"bing"`, enc)
-	})
-}
-
-type loggable struct{}
+type loggable struct{ bool }
 
 func (l loggable) MarshalLog(kv KeyValue) error {
+	if !l.bool {
+		return errors.New("can't marshal")
+	}
 	kv.AddString("loggable", "yes")
 	return nil
 }
 
-func TestJSONAddMarshaler(t *testing.T) {
+func assertOutput(t testing.TB, desc string, expected string, f func(Encoder)) {
 	withJSONEncoder(func(enc *jsonEncoder) {
-		err := enc.AddMarshaler("nested", loggable{})
-		require.NoError(t, err, "Unexpected error using AddMarshaler.")
-		assertJSON(t, `"foo":"bar","nested":{"loggable":"yes"}`, enc)
+		f(enc)
+		assert.Equal(t, expected, string(enc.bytes), "Unexpected encoder output after adding a %s.", desc)
+	})
+	withJSONEncoder(func(enc *jsonEncoder) {
+		enc.AddString("foo", "bar")
+		f(enc)
+		expectedPrefix := `"foo":"bar"`
+		if expected != "" {
+			// If we expect output, it should be comma-separated from the previous
+			// field.
+			expectedPrefix += ","
+		}
+		assert.Equal(t, expectedPrefix+expected, string(enc.bytes), "Unexpected encoder output after adding a %s as a second field.", desc)
 	})
 }
 
-func TestJSONAddObject(t *testing.T) {
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddObject("nested", map[string]string{"loggable": "yes"})
-		assertJSON(t, `"foo":"bar","nested":{"loggable":"yes"}`, enc)
-	})
+func TestJSONEncoderFields(t *testing.T) {
+	tests := []struct {
+		desc     string
+		expected string
+		f        func(Encoder)
+	}{
+		{"string", `"k":"v"`, func(e Encoder) { e.AddString("k", "v") }},
+		{"string", `"k":""`, func(e Encoder) { e.AddString("k", "") }},
+		{"string", `"k\\":"v\\"`, func(e Encoder) { e.AddString(`k\`, `v\`) }},
+		{"bool", `"k":true`, func(e Encoder) { e.AddBool("k", true) }},
+		{"bool", `"k":false`, func(e Encoder) { e.AddBool("k", false) }},
+		{"bool", `"k\\":true`, func(e Encoder) { e.AddBool(`k\`, true) }},
+		{"int", `"k":42`, func(e Encoder) { e.AddInt("k", 42) }},
+		{"int", `"k\\":42`, func(e Encoder) { e.AddInt(`k\`, 42) }},
+		{"int64", fmt.Sprintf(`"k":%d`, math.MaxInt64), func(e Encoder) { e.AddInt64("k", math.MaxInt64) }},
+		{"int64", fmt.Sprintf(`"k":%d`, math.MinInt64), func(e Encoder) { e.AddInt64("k", math.MinInt64) }},
+		{"int64", fmt.Sprintf(`"k\\":%d`, math.MaxInt64), func(e Encoder) { e.AddInt64(`k\`, math.MaxInt64) }},
+		{"uint", `"k":42`, func(e Encoder) { e.AddUint("k", 42) }},
+		{"uint", `"k\\":42`, func(e Encoder) { e.AddUint(`k\`, 42) }},
+		{"uint64", fmt.Sprintf(`"k":%d`, uint64(math.MaxUint64)), func(e Encoder) { e.AddUint64("k", math.MaxUint64) }},
+		{"uint64", fmt.Sprintf(`"k\\":%d`, uint64(math.MaxUint64)), func(e Encoder) { e.AddUint64(`k\`, math.MaxUint64) }},
+		{"uintptr", fmt.Sprintf(`"k":%d`, uint64(math.MaxUint64)), func(e Encoder) { e.AddUintptr("k", uintptr(math.MaxUint64)) }},
+		{"float64", `"k":1`, func(e Encoder) { e.AddFloat64("k", 1.0) }},
+		{"float64", `"k\\":1`, func(e Encoder) { e.AddFloat64(`k\`, 1.0) }},
+		{"float64", `"k":10000000000`, func(e Encoder) { e.AddFloat64("k", 1e10) }},
+		{"float64", `"k":"NaN"`, func(e Encoder) { e.AddFloat64("k", math.NaN()) }},
+		{"float64", `"k":"+Inf"`, func(e Encoder) { e.AddFloat64("k", math.Inf(1)) }},
+		{"float64", `"k":"-Inf"`, func(e Encoder) { e.AddFloat64("k", math.Inf(-1)) }},
+		{"marshaler", `"k":{"loggable":"yes"}`, func(e Encoder) {
+			assert.NoError(t, e.AddMarshaler("k", loggable{true}), "Unexpected error calling MarshalLog.")
+		}},
+		{"marshaler", `"k\\":{"loggable":"yes"}`, func(e Encoder) {
+			assert.NoError(t, e.AddMarshaler(`k\`, loggable{true}), "Unexpected error calling MarshalLog.")
+		}},
+		{"marshaler", `"k":{}`, func(e Encoder) {
+			assert.Error(t, e.AddMarshaler("k", loggable{false}), "Expected an error calling MarshalLog.")
+		}},
+		{"arbitrary object", `"k":{"loggable":"yes"}`, func(e Encoder) {
+			assert.NoError(t, e.AddObject("k", map[string]string{"loggable": "yes"}), "Unexpected error JSON-serializing a map.")
+		}},
+		{"arbitrary object", `"k\\":{"loggable":"yes"}`, func(e Encoder) {
+			assert.NoError(t, e.AddObject(`k\`, map[string]string{"loggable": "yes"}), "Unexpected error JSON-serializing a map.")
+		}},
+		{"arbitrary object", "", func(e Encoder) {
+			assert.Error(t, e.AddObject("k", noJSON{}), "Unexpected success JSON-serializing a noJSON.")
+		}},
+	}
 
-	withJSONEncoder(func(enc *jsonEncoder) {
-		enc.AddObject("nested", noJSON{})
-		assertJSON(
-			t,
-			`"foo":"bar","nested":"json: error calling MarshalJSON for type zap.noJSON: no"`,
-			enc,
-		)
-	})
+	for _, tt := range tests {
+		assertOutput(t, tt.desc, tt.expected, tt.f)
+	}
+}
+
+func TestJSONWriteEntry(t *testing.T) {
+	entry := &Entry{Level: InfoLevel, Message: `hello\`, Time: time.Unix(0, 0)}
+	enc := NewJSONEncoder()
+
+	assert.Equal(t, errNilSink, enc.WriteEntry(
+		nil,
+		entry.Message,
+		entry.Level,
+		entry.Time,
+	), "Expected an error writing to a nil sink.")
+
+	// Messages should be escaped.
+	sink := &testBuffer{}
+	enc.AddString("foo", "bar")
+	err := enc.WriteEntry(sink, entry.Message, entry.Level, entry.Time)
+	assert.NoError(t, err, "WriteEntry returned an unexpected error.")
+	assert.Equal(
+		t,
+		`{"level":"info","ts":0,"msg":"hello\\","foo":"bar"}`,
+		sink.Stripped(),
+	)
+
+	// We should be able to re-use the encoder, preserving the accumulated
+	// fields.
+	sink.Reset()
+	err = enc.WriteEntry(sink, entry.Message, entry.Level, time.Unix(100, 0))
+	assert.NoError(t, err, "WriteEntry returned an unexpected error.")
+	assert.Equal(
+		t,
+		`{"level":"info","ts":100,"msg":"hello\\","foo":"bar"}`,
+		sink.Stripped(),
+	)
+}
+
+func TestJSONWriteEntryLargeTimestamps(t *testing.T) {
+	// Ensure that we don't switch to exponential notation when encoding dates far in the future.
+	sink := &testBuffer{}
+	enc := NewJSONEncoder()
+	future := time.Date(2100, time.January, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, enc.WriteEntry(sink, "fake msg", DebugLevel, future))
+	assert.Contains(
+		t,
+		sink.Stripped(),
+		`"ts":4102444800,`,
+		"Expected to encode large timestamps using grade-school notation.",
+	)
 }
 
 func TestJSONClone(t *testing.T) {
@@ -206,7 +217,7 @@ func TestJSONClone(t *testing.T) {
 	assertJSON(t, `"baz":"bing"`, clone.(*jsonEncoder))
 }
 
-func TestJSONWriteMessageFailure(t *testing.T) {
+func TestJSONWriteEntryFailure(t *testing.T) {
 	withJSONEncoder(func(enc *jsonEncoder) {
 		tests := []struct {
 			sink io.Writer
@@ -216,13 +227,13 @@ func TestJSONWriteMessageFailure(t *testing.T) {
 			{spywrite.ShortWriter{}, "Expected an error on partial writes to sink."},
 		}
 		for _, tt := range tests {
-			err := enc.WriteMessage(tt.sink, "info", "hello", time.Unix(0, 0))
+			err := enc.WriteEntry(tt.sink, "hello", InfoLevel, time.Unix(0, 0))
 			assert.Error(t, err, tt.msg)
 		}
 	})
 }
 
-func TestJSONJSONEscaping(t *testing.T) {
+func TestJSONEscaping(t *testing.T) {
 	// Test all the edge cases of JSON escaping directly.
 	cases := map[string]string{
 		// ASCII.
@@ -260,5 +271,24 @@ func TestJSONJSONEscaping(t *testing.T) {
 		enc.truncate()
 		enc.safeAddString(input)
 		assertJSON(t, output, enc)
+	}
+}
+
+func TestJSONOptions(t *testing.T) {
+	root := NewJSONEncoder(
+		MessageKey("the-message"),
+		LevelString("the-level"),
+		RFC3339Formatter("the-timestamp"),
+	)
+
+	for _, enc := range []Encoder{root, root.Clone()} {
+		buf := &bytes.Buffer{}
+		enc.WriteEntry(buf, "fake msg", DebugLevel, epoch)
+		assert.Equal(
+			t,
+			`{"the-level":"debug","the-timestamp":"1970-01-01T00:00:00Z","the-message":"fake msg"}`+"\n",
+			buf.String(),
+			"Unexpected log output with non-default encoder options.",
+		)
 	}
 }
